@@ -5,7 +5,8 @@ yarıda kesilirse aynı komutla kaldığı yerden devam eder. --reevaluate ile �
 (örneğin ölçü yöntemi değiştiğinde; indeksler yine yeniden kurulmaz).
 
 Kullanım:
-    .venv\Scripts\python.exe run_experiments.py
+    .venv\Scripts\python.exe run_experiments.py                           # config.py'deki test seti
+    .venv\Scripts\python.exe run_experiments.py --test-sets v2 dilekce_v1  # indeks bir kez kurulur, ikisi ölçülür
     .venv\Scripts\python.exe run_experiments.py --reevaluate
 """
 import argparse
@@ -13,8 +14,6 @@ import argparse
 import config
 from build_index import build
 from evaluate import evaluate
-
-TEST_SET = config.TEST_SET_VERSION
 
 # Havuz boyutuna göre deneme listesi: (yöntem, parça sınırı, örtüşme)
 # 2000'lik havuzda tüm tablo ölçüldü; büyük havuzlarda yalnızca temsilci denemeler çalıştırılır.
@@ -64,19 +63,23 @@ else:
 def main():
     parser = argparse.ArgumentParser(description="Parçalama denemelerini kurar ve ölçer")
     parser.add_argument("--reevaluate", action="store_true", help="Ölçülmüş denemeleri de yeniden ölç")
+    parser.add_argument("--test-sets", nargs="+", default=[config.TEST_SET_VERSION],
+                        help="Ölçülecek test setleri (örn. v2 dilekce_v1); varsayılan config.py'deki")
     args = parser.parse_args()
 
     for i, (method, chunk_tokens, overlap) in enumerate(EXPERIMENTS, 1):
         run = config.run_name(method, chunk_tokens, overlap)
-        if config.eval_path(run, TEST_SET).exists() and not args.reevaluate:
+        todo = [t for t in args.test_sets if args.reevaluate or not config.eval_path(run, t).exists()]
+        if not todo:
             print(f"[{i}/{len(EXPERIMENTS)}] {run}: zaten ölçülmüş, atlanıyor")
             continue
-        print(f"\n{'=' * 70}\n[{i}/{len(EXPERIMENTS)}] {run}\n{'=' * 70}")
+        print(f"\n{'=' * 70}\n[{i}/{len(EXPERIMENTS)}] {run}  (test setleri: {', '.join(todo)})\n{'=' * 70}")
         if config.index_info_path(run).exists():
             print("İndeks zaten kurulu, yalnızca ölçülüyor.")
         else:
             build(method, chunk_tokens, overlap)
-        evaluate(run, TEST_SET)
+        for test_set in todo:
+            evaluate(run, test_set)
     print(f"\nBitti. Karşılaştırma tablosu: {config.EXPERIMENTS_PATH}")
 
 
