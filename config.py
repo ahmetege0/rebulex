@@ -68,6 +68,11 @@ TRUST_REMOTE_CODE = False  # modelin kendi kodunu çalıştırmasına izin (yaln
 MODEL_DIR = DATASET_DIR / MODEL_FOLDER  # bu modelin bu havuzdaki bütün dosyaları
 QDRANT_PATH = MODEL_DIR / "qdrant"
 
+# Ekran kartına göre ayarlar; ortam değişkeniyle değiştirilir (varsayılanlar 6 GB'lık RTX 3060'a göre).
+# Colab L4/A100'de: REBULEX_BATCH_TOKENS=65536, REBULEX_DTYPE=bfloat16 -> birkaç kat hızlanır.
+BATCH_TOKENS = int(os.environ.get("REBULEX_BATCH_TOKENS", 16 * 1024))  # bir yığında işlenecek yaklaşık token
+MODEL_DTYPE = os.environ.get("REBULEX_DTYPE", "auto")  # "auto" (modelin kendi ayarı), "bfloat16", "float32"
+
 # Varsayılan deneme (build_index.py / search.py / evaluate.py komut satırından değiştirilebilir)
 # Parçalama yöntemi = chunking_methods klasöründeki dosya adı:
 # "per_decision", "fixed_tokens", "recursive", "sentence", "sections_structural", "sections_fixed", "sections_paragraph"
@@ -78,9 +83,8 @@ CHUNK_OVERLAP = CHUNK_TOKENS // 8  # örtüşme: 512 -> 64, 1024 -> 128 (per_dec
 
 def batch_size(method, chunk_tokens):
     """Uzun metinler ekran kartında çok bellek ister; uzadıkça aynı anda daha az metin işlenir."""
-    if method == "per_decision":
-        return 2
-    return 8 if chunk_tokens > 1024 else 16
+    tokens = MODEL_MAX_TOKENS if method == "per_decision" else chunk_tokens
+    return max(1, BATCH_TOKENS // tokens)
 
 
 def run_name(method=CHUNK_METHOD, chunk_tokens=CHUNK_TOKENS, overlap=CHUNK_OVERLAP):

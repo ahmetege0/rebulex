@@ -8,6 +8,7 @@ Kullanım:
 import argparse
 import textwrap
 
+import torch
 from qdrant_client import QdrantClient, models
 from sentence_transformers import SentenceTransformer
 
@@ -27,6 +28,8 @@ def load_model(device=None):
     """config.py'deki modeli yükler; okuyabileceği en fazla uzunluk MODEL_MAX_TOKENS ile sınırlanır."""
     model = SentenceTransformer(config.MODEL_NAME, device=device, trust_remote_code=config.TRUST_REMOTE_CODE)
     model.max_seq_length = config.MODEL_MAX_TOKENS
+    if config.MODEL_DTYPE != "auto":  # 16 bitlik hesap modern ekran kartlarında birkaç kat hızlı
+        model = model.to(getattr(torch, config.MODEL_DTYPE))
     return model
 
 
