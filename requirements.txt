@@ -1,0 +1,6 @@
+torch
+sentence-transformers>=5.0
+huggingface_hub>=1.0
+pyarrow
+pandas
+qdrant-client>=1.12

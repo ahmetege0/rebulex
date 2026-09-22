@@ -1,0 +1,10 @@
+# Veriler Drive'da durur (kararlar, parçalar, vektörler, Qdrant, sonuçlar)
+data/
+
+# Python ortamı ve önbellek
+.venv/
+__pycache__/
+*.pyc
+
+# LibreOffice kilit dosyaları
+.~lock.*
