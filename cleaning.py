@@ -350,6 +350,8 @@ class Cleaner:
                 continue
             if not EMSAL_PROCEDURAL_ITEMS.search(item) or EMSAL_OUTCOME.search(item):
                 kept.append(item)
+            elif re.search(r"karar verildi\b", item):  # kapanış bir usul maddesiyle aynı maddede: "karar verildi" kalır
+                kept.append(EMSAL_DECIDED.search(item)[0] + ".")
         return " ".join(kept)
 
     # ------------------------------------------------------------------ ortak adımlar
