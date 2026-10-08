@@ -1,7 +1,7 @@
 r"""Karar metinlerinden konuyla ilgisi olmayan kısımları atar: şablon cümleler, künye, imza blokları,
 isimler, şehir adları, tarihler, karar numaraları, atıflar.
 
-Her kaynağın kendi metodu var (şimdilik aym_bb, aym_norm, danistay ve emsal). Ortak işler yardımcı metotlarda.
+Her kaynağın kendi metodu var (aym_bb, aym_norm, danistay, emsal, yargitay). Ortak işler yardımcı metotlarda.
 
     from cleaning import Cleaner
     temiz = Cleaner().clean("aym_bb", metin)
@@ -105,7 +105,8 @@ AYM_BB_PROCEDURAL_ITEMS = re.compile(
 AYM_BB_OUTCOME = re.compile(r"KABUL EDİL|İHLAL EDİL|REDDİNE|[Tt]azminat|TAZMİNAT|yeniden yargılama|DÜŞMESİNE")
 # Hükmün kapanışı: "18/6/2020 tarihinde OYBİRLİĞİYLE karar verildi.", eski kararlarda "29/11/1977 gününde oybirliği ile
 # karar verildi." Yalnızca tarih kısmı atılır; "OYBİRLİĞİYLE karar verildi." kalır ki hüküm cümlesi yarım kalmasın.
-VERDICT_CLOSING = re.compile(r"\S+ (?:tarihinde|gününde),? (?P<kapanis>(?:(?:OY ?BİRLİĞİYLE|OY ?ÇOKLUĞUYLA"
+# Tarih açıkça aranır: "\S+" olsaydı boşluksuz yazımda önceki kelimeyi de alırdı ("ONANMASINA,05/12/2012 gününde").
+VERDICT_CLOSING = re.compile(rf"{_DAY_MONTH_YEAR} (?:tarihinde|gününde),? (?P<kapanis>(?:(?:OY ?BİRLİĞİYLE|OY ?ÇOKLUĞUYLA"
                              r"|[Oo]y ?birliği(?:yle| ile)|[Oo]y ?çokluğu(?:yla| ile)) )?karar verildi\.)")
 DISSENT = re.compile(r"\b(?:KARŞI ?OY|FARKLI GEREKÇE|MUHALEFET ŞERHİ)\w*")
 SIGNATURE = re.compile(r"\b(?:Başkan|Başkanvekili|Üye|Üyeler|Raportör(?: Yrd\.)?|Başvurucu|Başvurucular|Vekili|Vekilleri)"
@@ -245,6 +246,23 @@ EMSAL_OUTCOME = re.compile(r"KABUL|REDD|İPTAL|TAHSİL|SAYILMASINA|DEVAMINA|TESP
 EMSAL_CLOSING = re.compile(r"\bDair\b|yolu (?:açık|kabil) olmak üzere|usulen anlatıldı|okunup anlatıldı")
 EMSAL_DECIDED = re.compile(r"(?:(?:oy ?birliği(?:yle| ile)|oy ?çokluğu(?:yla| ile)) )?karar verildi", re.I)
 
+# Yargıtay: yalnızca kesin kalıplar atılır. MAHKEMESİ / SUÇ / HÜKÜM / TEBLİĞNAME GÖRÜŞÜ / DAVA TÜRÜ alanları, ceza ön
+# inceleme paragrafı, hukuk açılışındaki dava konusu, standart gerekçe cümleleri ve gönderme / tevdi maddeleri kalır.
+YARGITAY_TEMPLATES = [
+    r"^[^¶]*?\d+/\d+ E\. ?, ?\d+/\d+ K\.",  # künye satırı: "3. Ceza Dairesi 2013/30306 E. , 2014/23007 K."
+    r'"?İçtihat Metni"?',
+    r"(?:(?<=¶)|^)(?:SAYISI|TARİHİ|NUMARASI) ?:[^¶]*",  # "SAYISI : 2016/187 E., 2016/329 K."
+    r"Y ?A ?R ?G ?I ?T ?A ?Y K ?A ?R ?A ?R ?I",
+    r"(?:Yerel|Mahall[iî]) [Mm]ahkemece verilen hüküm(?:ler)? temyiz edilmekle(?:,? evrak okunarak)?;?",
+    r"Temyiz isteğinin reddi nedenleri bulunmadığından işin esasına geçildi\.",
+    r"kesinlik, süre, temyiz şartı ve diğer usul eksiklikleri yönünden yapılan ön inceleme sonucunda,? temyiz "
+    r"dilekçesinin kabulüne karar verildikten (?:sonra )?ve (?:Tetkik H[âa]kimi [^¶]{0,40}?tarafından hazırlanan "
+    r"rapor dinlendikten sonra )?dosyadaki belgeler incelenip",
+    r"(?:Türk Milleti adına )?[Gg]ereği (?:görüşülüp )?düşünüldü ?[:;]?",
+    r"Açıklanan sebeple(?:rle)?;",
+    rf"{_CLAUSE}{_NO_OUTCOME}[Hh]arc\w*{_NO_OUTCOME}(?:alınmasına|iadesine)[,;]?",  # harç maddeleri
+]
+
 
 class Cleaner:
     def clean(self, source, text):
@@ -354,6 +372,16 @@ class Cleaner:
                 kept.append(EMSAL_DECIDED.search(item)[0] + ".")
         return " ".join(kept)
 
+    # ------------------------------------------------------------------ Yargıtay
+    def yargitay(self, text):
+        lines = [l for l in text.splitlines() if not re.search(r"e-?[İi]mza|[Ee]lektronik imza|✍", l) or len(l) > 150]
+        text = PARAGRAPH.join(re.sub(r"\s+", " ", l).strip() for l in lines if l.strip())
+        text = re.sub(r"\bK A R A R\b", "KARAR", text)
+        for pattern in YARGITAY_TEMPLATES:
+            text = re.sub(pattern, "", text)
+        text = VERDICT_CLOSING.sub(r"\g<kapanis>", text)  # tarih gider, "oybirliğiyle karar verildi." kalır
+        return self.finish(text)
+
     # ------------------------------------------------------------------ ortak adımlar
     def finish(self, text):
         """Bütün kaynaklarda en son yapılanlar: atıflar, sayılar, isimler, şehirler, boşluk düzeltme."""
@@ -462,7 +490,7 @@ if __name__ == "__main__":
 
     import config
 
-    SOURCES = ["emsal"]  # raporu yazılacak kaynaklar (şu an yalnızca gözden geçirilen mahkeme)
+    SOURCES = ["yargitay"]  # raporu yazılacak kaynaklar (şu an yalnızca gözden geçirilen mahkeme)
     SAMPLE = 10  # her kaynak için rapora önce/sonra hâliyle yazılacak karar sayısı
     pool = pd.read_parquet(config.dataset_dir(2000) / "kararlar.parquet")
     cleaner = Cleaner()
