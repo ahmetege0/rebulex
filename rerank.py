@@ -118,8 +118,10 @@ class Qwen3Reranker:
                                  max_length=MAX_TOKENS - len(self.prefix) - len(self.suffix))["input_ids"]
             batch = self.tokenizer.pad({"input_ids": [self.prefix + x + self.suffix for x in ids]},
                                        return_tensors="pt").to(self.model.device)
+            # yalnızca son tokenın kelime olasılıkları hesaplansın; hepsi hesaplanırsa bellek taşar
+            # (32 çift × 1664 token × 151 bin kelime ≈ 15 GB). Dolgu solda olduğu için son token her çiftte gerçek son
             with torch.no_grad():
-                logits = self.model(**batch).logits[:, -1, [self.no, self.yes]]
+                logits = self.model(**batch, logits_to_keep=1).logits[:, -1, [self.no, self.yes]]
             scores += logits.float().softmax(-1)[:, 1].tolist()
         return np.array(scores)
 
