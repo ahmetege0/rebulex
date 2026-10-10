@@ -67,7 +67,9 @@ DATE = re.compile(rf"{_DAY_MONTH_YEAR}(?:['’][{LOW}]+)?(?: (?:{_DATE_WORD}))?"
 # metinde boşta "tarih ve sayılı", "ili, Mahallesi, ada ve parsel sayılı" kalır.
 # "27/01/2010 tarih ve 27475 sayılı", "... tarih ve E:..., K:... sayılı", "... ada ve ... parsel sayılı", "... ili,"
 # yer tutucu ".." / "..." / "…" yazılır; değer ile etiket arasında boşluk olmayabilir: "...tarih", "K:...sayılı"
-_VALUE = (r"(?:(?:\.{2,}|…)+|\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b|\b\d[\d./-]*\b"
+# "++": nokta dizisi bir kez bütün olarak alınır, geri dönülüp başka türlü bölünmez; yoksa 100 noktalık bir dizide
+# (karardaki doldurma çizgileri) regex dakikalarca takılır. Silinen metin değişmez.
+_VALUE = (r"(?:(?:\.{2,}|…)++|\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b|\b\d[\d./-]*\b"
           r"|\bE ?[.:] ?(?:\.{2,}|…|\d+/\d+),? ?K ?[.:]? ?(?:\.{2,}|…|\d+/\d+))")
 _LABEL = (r"(?:tarih(?:li)?|günlü|tarih(?:inde|ine|inden|i|te|ten)|gün(?:ü|ünde|kü)|sayılı|numaralı|nolu|no'lu|plakalı"
           r"|ada|parsel|pafta|ili|İli|ilçesi|Mahallesi|mahallesi|Köyü|köyü|Sokak|Caddesi|Bulvarı)")

@@ -64,6 +64,7 @@ MODEL_MAX_TOKENS = 8192  # modelin tek seferde okuyabildiği en fazla token
 QUERY_PROMPT = "task: search result | query: "  # aranan metnin başına eklenir
 DOCUMENT_FORMAT = "title: {title} | text: {text}"  # parçanın modele veriliş biçimi; title = karar künyesi
 TRUST_REMOTE_CODE = False  # modelin kendi kodunu çalıştırmasına izin (yalnızca gte_multi için True)
+FULL_TITLE = True  # parça başlığında tam künye; False: yalnızca kaynak ve daire ("Yargıtay 13. Ceza Dairesi")
 
 MODEL_DIR = DATASET_DIR / MODEL_FOLDER  # bu modelin bu havuzdaki bütün dosyaları
 QDRANT_PATH = MODEL_DIR / "qdrant"

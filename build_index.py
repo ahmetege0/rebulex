@@ -27,8 +27,9 @@ def _clean(value):
 
 def decision_header(row):
     court, esas, karar = _clean(row.court), _clean(row.esas_no), _clean(row.karar_no)
-    parts = [config.SOURCE_LABELS[row.source], court,
-             esas and f"{esas} E.", karar and f"{karar} K.", _clean(row.karar_tarihi)]
+    parts = [config.SOURCE_LABELS[row.source], court]
+    if config.FULL_TITLE:  # esas, karar numarası ve tarih
+        parts += [esas and f"{esas} E.", karar and f"{karar} K.", _clean(row.karar_tarihi)]
     return " ".join(p for p in parts if p)
 
 
