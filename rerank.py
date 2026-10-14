@@ -8,14 +8,24 @@ r"""Embedding aramasının getirdiği ilk 100 kararı bir reranker'la yeniden s�
 
 "yok" adlı reranker 1. aşamanın sırasını olduğu gibi bırakır; aynı kodla ölçülmüş karşılaştırma noktasıdır.
 
+--metin: reranker'ın okuduğu metin.
+    parca     adayın en iyi parçası (sınır 1664 token)
+    temiz     kararın temiz metni (kararlar_temiz.parquet), sınır 8192 token
+    orijinal  kararın orijinal metni (kararlar.parquet), sınır 8192 token
+    Tam metinde sorgu + karar sınıra sığmıyorsa karar parçalara bölünür; her parça sorguyla ayrı okunur,
+    kararın puanı en yüksek parçanın puanıdır.
+
 Çıktılar. Her (kaynak, reranker, test seti) ayrı dosyaya yazılır, hiçbiri bir diğerinin üzerine yazmaz.
 Bitmiş ölçümler atlanır; yarıda kesilirse aynı komutla kaldığı yerden devam eder.
     data/n2000/rerank/<kaynak>/<reranker>/<deneme>_<test seti>.csv   sorgu sorgu: sira_once, sira_sonra ...
+    (tam metinde klasör rerank_temiz / rerank_orijinal)
     data/experiments.csv                                              ölçüm başına bir satır (önünde bir kez "#####")
 
 Kullanım:
     .venv\Scripts\python.exe rerank.py                                     # bütün kaynaklar, bütün rerankerlar
     .venv\Scripts\python.exe rerank.py --kaynak temiz/cosmos_e5 --reranker yok modernbert_tr --test-set v2
+    .venv\Scripts\python.exe rerank.py --metin temiz --reranker bge_m3
+    .venv\Scripts\python.exe rerank.py --bellek-testi        # her reranker'a bir grup en uzun çift; bellek yetiyor mu
 """
 import argparse
 import gc
@@ -38,7 +48,6 @@ from search import load_model
 
 SIZE = 2000
 POOL_DIR = config.dataset_dir(SIZE)
-OUT_DIR = POOL_DIR / "rerank"
 TEST_SETS = ["v2", "dilekce_v1"]
 SEPARATOR = "#" * 30 + " reranker"
 
@@ -56,7 +65,10 @@ RERANKERS = {
     "qwen3_06b": "Qwen/Qwen3-Reranker-0.6B",
 }
 CANDIDATES = 100  # reranker'a verilen aday karar sayısı
-MAX_TOKENS = 1664  # reranker'ın okuduğu sorgu + parça; dilekçe ~600 + parça 1024. Uzunsa parçanın sonu kesilir
+# reranker'ın okuduğu sorgu + metin. Parçada: dilekçe ~600 + parça 1024; uzunsa parçanın sonu kesilir.
+# Tam metinde: üç reranker da 8192 okuyabiliyor; sığmayan karar parçalara bölünür
+MAX_TOKENS = {"parca": 1664, "temiz": 8192, "orijinal": 8192}
+MARGIN = 128  # tam metni bölerken şablon ve özel tokenlar için ayrılan pay
 # ekran kartında aynı anda puanlanan çift sayısı; varsayılan 6 GB'a göre, Colab L4/A100'de ortam değişkeniyle büyütülür
 BATCH_SIZE = int(os.environ.get("REBULEX_RERANK_BATCH", 8))
 
@@ -98,9 +110,16 @@ class Qwen3Reranker:
     PREFIX = ("<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the "
               "Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n")
     SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"
+    # göreve özel talimat (modelin sayfası İngilizce talimat öneriyor)
+    INSTRUCTIONS = {
+        "v2": "Given a description of a legal issue or case in Turkish, retrieve Turkish court decisions "
+              "that rule on the same legal issue",
+        "dilekce_v1": "Given a Turkish legal petition, retrieve Turkish court decisions that rule on the same "
+                      "legal dispute",
+    }
 
-    def __init__(self, name):
+    def __init__(self, name, max_tokens):
+        self.max_tokens = max_tokens
         self.tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
         self.model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float16).to("cuda").eval()
         self.yes = self.tokenizer.convert_tokens_to_ids("yes")
@@ -108,14 +127,16 @@ class Qwen3Reranker:
         self.prefix = self.tokenizer.encode(self.PREFIX, add_special_tokens=False)
         self.suffix = self.tokenizer.encode(self.SUFFIX, add_special_tokens=False)
 
-    def predict(self, pairs, batch_size):
+    def predict(self, pairs, batch_size, test_set):
+        # uzun çiftler bir arada gruplansın diye uzunluğa göre (en uzun başta) sıralanır; puanlar sonra eski sıraya döner
+        order = np.argsort([-len(query) - len(doc) for query, doc in pairs], kind="stable")
         scores = []
         for start in tqdm(range(0, len(pairs), batch_size)):
-            texts = [f"<Instruct>: {self.INSTRUCTION}\n<Query>: {query}\n<Document>: {doc}"
-                     for query, doc in pairs[start:start + batch_size]]
+            texts = [f"<Instruct>: {self.INSTRUCTIONS[test_set]}\n<Query>: {pairs[i][0]}\n<Document>: {pairs[i][1]}"
+                     for i in order[start:start + batch_size]]
             # metin sınırı aşarsa sonundan (belgenin sonundan) kesilir; şablonun başı ve sonu her zaman eklenir
             ids = self.tokenizer(texts, truncation=True, add_special_tokens=False,
-                                 max_length=MAX_TOKENS - len(self.prefix) - len(self.suffix))["input_ids"]
+                                 max_length=self.max_tokens - len(self.prefix) - len(self.suffix))["input_ids"]
             batch = self.tokenizer.pad({"input_ids": [self.prefix + x + self.suffix for x in ids]},
                                        return_tensors="pt").to(self.model.device)
             # yalnızca son tokenın kelime olasılıkları hesaplansın; hepsi hesaplanırsa bellek taşar
@@ -123,22 +144,44 @@ class Qwen3Reranker:
             with torch.no_grad():
                 logits = self.model(**batch, logits_to_keep=1).logits[:, -1, [self.no, self.yes]]
             scores += logits.float().softmax(-1)[:, 1].tolist()
-        return np.array(scores)
+        result = np.empty(len(pairs))
+        result[order] = scores
+        return result
 
 
 class CrossEncoderReranker:
     """bge ve ModernBERT: sorgu ile parça tek girdi olarak okunur, model bir puan verir."""
 
-    def __init__(self, name):
-        self.model = CrossEncoder(name, max_length=MAX_TOKENS, device="cuda",
+    def __init__(self, name, max_tokens):
+        self.model = CrossEncoder(name, max_length=max_tokens, device="cuda",
                                   model_kwargs={"dtype": torch.float16})
+        self.tokenizer = self.model.tokenizer
 
-    def predict(self, pairs, batch_size):
+    def predict(self, pairs, batch_size, test_set):
+        # CrossEncoder çiftleri kendisi uzunluğa göre sıralar (en uzun başta)
         return self.model.predict(pairs, batch_size=batch_size, show_progress_bar=True)
 
 
-def load_reranker(name):
-    return Qwen3Reranker(name) if name.startswith("Qwen/") else CrossEncoderReranker(name)
+def load_reranker(name, max_tokens):
+    return Qwen3Reranker(name, max_tokens) if name.startswith("Qwen/") else CrossEncoderReranker(name, max_tokens)
+
+
+def split_long(pairs, tokenizer, max_tokens):
+    """Sığmayan kararı parçalara böler, her parça sorguyla ayrı bir çift olur.
+    owner[i]: i. çiftin geldiği satır; satırın puanı parçalarının en yüksek puanı olur."""
+    query_tokens = {}
+    new_pairs, owner = [], []
+    for row, (query, doc) in enumerate(pairs):
+        if query not in query_tokens:
+            query_tokens[query] = len(tokenizer(query, add_special_tokens=False)["input_ids"])
+        room = max_tokens - query_tokens[query] - MARGIN
+        # her tokenın metindeki karakter konumu; parçalar metinden olduğu gibi kesilir
+        offsets = tokenizer(doc, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
+        starts = [offsets[i][0] for i in range(0, len(offsets), room)] + [len(doc)]
+        pieces = [doc[a:b] for a, b in zip(starts, starts[1:])] or [doc]
+        new_pairs += [(query, piece) for piece in pieces]
+        owner += [row] * len(pieces)
+    return new_pairs, owner
 
 
 # ---------------------------------------------------------------- ölçüm
@@ -180,13 +223,13 @@ def summarize(results):
     return summary
 
 
-def log(folder, run, test_set, reranker, n_queries, summary, seconds):
+def log(folder, run, test_set, reranker, metin, n_queries, summary, seconds):
     """experiments.csv'ye bir satır ekler; ilk reranker ölçümünden önce bir kez ayırıcı satır konur."""
     info = json.loads((POOL_DIR / folder / "index_info" / f"{run}.json").read_text(encoding="utf-8"))
     row = {**info, "test_seti": test_set, "test_sorgu": n_queries, "reranker": RERANKERS[reranker] or "yok",
            "aday_sayisi": CANDIDATES, "rerank_sn": round(seconds),
            **{k: round(v, 2) for k, v in summary.items()},
-           "olcum_tarihi": datetime.now().strftime("%Y-%m-%d %H:%M"), "not": f"rerank; aday: n{SIZE}/{folder}"}
+           "olcum_tarihi": datetime.now().strftime("%Y-%m-%d %H:%M"), "not": f"rerank; metin: {metin}; aday: n{SIZE}/{folder}"}
     path = config.EXPERIMENTS_PATH
     old = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False)
     if SEPARATOR not in old.tarih.values:
@@ -195,8 +238,29 @@ def log(folder, run, test_set, reranker, n_queries, summary, seconds):
     pd.concat([old, new], ignore_index=True).fillna("").to_csv(path, index=False, encoding="utf-8-sig")
 
 
-def out_path(folder, reranker, run, test_set):
-    return OUT_DIR / folder / reranker / f"{run}_{test_set}.csv"
+def out_dir(metin):
+    return POOL_DIR / ("rerank" if metin == "parca" else f"rerank_{metin}")
+
+
+def out_path(metin, folder, reranker, run, test_set):
+    return out_dir(metin) / folder / reranker / f"{run}_{test_set}.csv"
+
+
+def memory_test(batch_size):
+    """Her reranker'a bir grup en uzun (8192 tokenlık) çift verir; bellek hatası gece değil şimdi çıksın."""
+    text = "Mahkeme kararı metni. " * 3000
+    for reranker, name in RERANKERS.items():
+        if not name:
+            continue
+        model = load_reranker(name, MAX_TOKENS["temiz"])
+        start = time.time()
+        model.predict([("dava dilekçesi " * 300, text)] * batch_size, batch_size, "dilekce_v1")
+        print(f"{reranker}: {batch_size} çift × 8192 token sorunsuz ({time.time() - start:.0f} sn), "
+              f"en yüksek bellek {torch.cuda.max_memory_allocated() / 2**30:.1f} GB")
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
 
 def main():
@@ -204,10 +268,15 @@ def main():
     parser.add_argument("--kaynak", nargs="+", help="Yalnızca bu klasörler (örn. temiz/cosmos_e5)")
     parser.add_argument("--reranker", nargs="+", choices=list(RERANKERS), default=list(RERANKERS))
     parser.add_argument("--test-set", nargs="+", choices=TEST_SETS, default=TEST_SETS)
+    parser.add_argument("--metin", choices=list(MAX_TOKENS), default="parca", help="Reranker'ın okuduğu metin")
+    parser.add_argument("--bellek-testi", action="store_true", help="Yalnızca bellek testi")
     args = parser.parse_args()
+    if args.bellek_testi:
+        memory_test(BATCH_SIZE)
+        return
     sources = [s for s in SOURCES if not args.kaynak or s[0] in args.kaynak]
     todo = [(folder, run, reranker, test_set) for folder, run in sources for reranker in args.reranker
-            for test_set in args.test_set if not out_path(folder, reranker, run, test_set).exists()]
+            for test_set in args.test_set if not out_path(args.metin, folder, reranker, run, test_set).exists()]
     if not todo:
         print("Bütün ölçümler zaten yapılmış.")
         return
@@ -215,6 +284,12 @@ def main():
     original = pd.read_parquet(config.dataset_dir(SIZE) / "kararlar.parquet",
                                columns=["id", "source", "court", "esas_no", "text"]).fillna("")
     relevance = Relevance(dict(zip(original.id, original.text)))  # kanun ortaklığı orijinal metinden
+    # tam metinde reranker'ın okuyacağı karar metinleri (decision_id → metin)
+    if args.metin == "orijinal":
+        full_texts = dict(zip(original.id, original.text))
+    elif args.metin == "temiz":
+        clean = pd.read_parquet(POOL_DIR / "kararlar_temiz.parquet", columns=["id", "text"]).fillna("")
+        full_texts = dict(zip(clean.id, clean.text))
     names = {r.id: " ".join(p for p in [config.SOURCE_LABELS[r.source], r.court, r.esas_no and f"{r.esas_no} E."] if p)
              for r in original.itertuples()}
 
@@ -228,30 +303,36 @@ def main():
         if not jobs:
             continue
         print(f"\n{'=' * 70}\nreranker: {reranker} ({RERANKERS[reranker] or 'sıra değişmez'})\n{'=' * 70}")
-        model = load_reranker(RERANKERS[reranker]) if RERANKERS[reranker] else None
+        model = load_reranker(RERANKERS[reranker], MAX_TOKENS[args.metin]) if RERANKERS[reranker] else None
         for folder, run, _, test_set in jobs:
             frame = candidates[(folder, run)][test_set].copy()
             start = time.time()
             if model:
                 queries = pd.read_csv(config.test_set_path(test_set), encoding="utf-8-sig",
                                       keep_default_na=False).set_index("test_id").sorgu
-                pairs = list(zip(frame.test_id.map(queries), frame.text))
-                frame["puan"] = model.predict(pairs, BATCH_SIZE)
+                texts = frame.text if args.metin == "parca" else frame.decision_id.map(full_texts)
+                pairs = list(zip(frame.test_id.map(queries), texts))
+                if args.metin == "parca":
+                    frame["puan"] = model.predict(pairs, BATCH_SIZE, test_set)
+                else:
+                    pairs, owner = split_long(pairs, model.tokenizer, MAX_TOKENS[args.metin])
+                    scores = model.predict(pairs, BATCH_SIZE, test_set)
+                    frame["puan"] = pd.Series(scores).groupby(owner).max().to_numpy()
             else:
                 frame["puan"] = -frame.sira_once  # sıra değişmez
             seconds = time.time() - start
             results = measure(frame, test_set, relevance, names)
-            path = out_path(folder, reranker, run, test_set)
+            path = out_path(args.metin, folder, reranker, run, test_set)
             path.parent.mkdir(parents=True, exist_ok=True)
             results.to_csv(path, index=False, encoding="utf-8-sig")
             summary = summarize(results)
-            log(folder, run, test_set, reranker, len(results), summary, seconds)
+            log(folder, run, test_set, reranker, args.metin, len(results), summary, seconds)
             print(f"{folder} {run} | {test_set} | {seconds:.0f} sn | "
                   + ", ".join(f"{k} {v:.1f}" for k, v in summary.items()))
         del model
         gc.collect()
         torch.cuda.empty_cache()
-    print(f"\nBitti. Sonuçlar: {OUT_DIR} ve {config.EXPERIMENTS_PATH}")
+    print(f"\nBitti. Sonuçlar: {out_dir(args.metin)} ve {config.EXPERIMENTS_PATH}")
 
 
 if __name__ == "__main__":
