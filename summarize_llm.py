@@ -42,12 +42,15 @@ OUT_DIR = POOL_DIR / "ozet"
 LLM = "magibu/magibu-11b-v0.8"
 SYSTEM = "Sadece istenen çıktıyı üret."  # Magibu'nun kendi Cetvel ölçümündeki sistem mesajı (model kartı)
 MAX_NEW_TOKENS = 2048  # yalnızca güvenlik sınırı; gerçek özet uzunluğu örneklere bakılarak seçilecek
-# 1. denemede do_sample=False ile iki uzun AYM kararı döngüye girdi (aynı cümle yüzlerce kez).
-# Tekrar cezası daha önce üretilmiş tokenların olasılığını düşürür; üretim yine deterministik kalır.
-REPETITION_PENALTY = 1.1
-# Metne çevirirken silinecek kontrol tokenları. Bunların dışındaki "özel" tokenlar (Magibu'nun eklediği Türkçe
-# tokenlar özel işaretliyse) korunur: 1. denemede "HUKİ MESELE", "SONÇ" gibi harf kayıpları görüldü.
-CONTROL_TOKENS = ["<end_of_turn>", "<start_of_turn>", "<eos>", "<bos>", "<pad>"]
+# Üretim ayarları (3. deneme):
+# - 1. deneme greedy (do_sample=False): uzun kararlar döngüye girdi.
+# - 2. deneme greedy + repetition_penalty=1.1: döngü sürdü; ceza girdideki (kararın) kelimelerine de uygulandığı
+#   için harf kayıpları arttı ("omyon" <- otomasyon). Ceza kaldırıldı.
+# - 3. deneme: düşük sıcaklıkla örnekleme. Her karardan önce aynı seed verilir: aynı karar aynı ekran kartında
+#   yine aynı özeti verir.
+TEMPERATURE = 0.3
+TOP_P = 0.9
+SEED = 42
 TEMPLATE = """Aşağıda bir Türk mahkeme kararı var. Bu kararı, hukuki arama sisteminde kullanılmak üzere
 aşağıdaki başlıklarla özetle.
 
@@ -83,11 +86,10 @@ def summarize_all(decisions):
     if not todo:
         print("Bütün özetler zaten var.")
         return
-    # model, model kartındaki gibi pipeline ile yüklenir; üretim, token numaralarını görebilmek için doğrudan
+    # model, model kartındaki gibi pipeline ile yüklenir; üretim, token sayısını görebilmek için doğrudan
     # model.generate ile yapılır
     generator = pipeline("text-generation", model=LLM, device="cuda", dtype=torch.bfloat16)
     tokenizer, model = generator.tokenizer, generator.model
-    special_ids = set(tokenizer.all_special_ids)
     for r in todo:
         messages = [{"role": "system", "content": SYSTEM},
                     {"role": "user", "content": TEMPLATE.format(metin=r.text)}]
@@ -95,22 +97,14 @@ def summarize_all(decisions):
                                                return_tensors="pt").to(model.device)
         input_tokens = inputs["input_ids"].shape[1]
         start = time.time()
-        # do_sample=False: aynı karar her seferinde aynı özeti verir (modelin varsayılanı rastgele üretim)
+        torch.manual_seed(SEED)  # örnekleme her kararda aynı yerden başlar
         with torch.no_grad():
-            output = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False,
-                                    repetition_penalty=REPETITION_PENALTY)
+            output = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=True,
+                                    temperature=TEMPERATURE, top_p=TOP_P)
         seconds = time.time() - start
         new_ids = output[0, input_tokens:].tolist()
-
-        # özet iki şekilde metne çevrilir: kontrol tokenları dışındaki her şey korunarak (asıl özet) ve
-        # 1. denemedeki gibi bütün özel tokenlar silinerek (karşılaştırma için)
-        summary = tokenizer.decode(new_ids, skip_special_tokens=False)
-        for token in CONTROL_TOKENS:
-            summary = summary.replace(token, "")
-        summary = summary.strip()
-        summary_old = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
-        lost = [tokenizer.convert_ids_to_tokens(i) for i in new_ids
-                if i in special_ids and tokenizer.convert_ids_to_tokens(i) not in CONTROL_TOKENS]
+        # 2. denemede özel tokenları silmeden metne çevirmek hiçbir fark yaratmadı (0 özel token); düz yönteme dönüldü
+        summary = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
 
         result = {
             "test_id": r.test_id, "karar_id": r.id, "kunye": r.kunye,
@@ -118,14 +112,12 @@ def summarize_all(decisions):
             "ozet_kelime": len(summary.split()), "ozet_token": len(new_ids),
             "sinira_carpti": len(new_ids) >= MAX_NEW_TOKENS,
             "sure_sn": round(seconds), "model": LLM, "max_new_tokens": MAX_NEW_TOKENS,
-            "repetition_penalty": REPETITION_PENALTY,
-            "ozel_token_sayisi": len(lost), "ozel_token_ornek": lost[:30],
-            "ozet": summary, "ozet_ozel_tokenlar_silinmis": summary_old,
+            "temperature": TEMPERATURE, "top_p": TOP_P, "top_k": model.generation_config.top_k, "seed": SEED,
+            "ozet": summary,
         }
         (OUT_DIR / f"{r.test_id}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"{r.test_id} | giriş {input_tokens} token | özet {len(new_ids)} token, {result['ozet_kelime']} kelime"
-              f"{' (SINIRA ÇARPTI)' if result['sinira_carpti'] else ''} | {seconds:.0f} sn | "
-              f"silinmeyen özel token: {len(lost)}")
+              f"{' (SINIRA ÇARPTI)' if result['sinira_carpti'] else ''} | {seconds:.0f} sn")
     del generator
     gc.collect()
     torch.cuda.empty_cache()
