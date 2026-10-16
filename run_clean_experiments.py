@@ -59,6 +59,11 @@ MODELS = {
     "embeddinggemma": dict(MODEL_NAME="google/embeddinggemma-300m", MODEL_MAX_TOKENS=2048,
                            QUERY_PROMPT="task: search result | query: ",
                            DOCUMENT_FORMAT="title: {title} | text: {text}"),
+    # Magibu'nun 2. modeli (EmbeddingGemma 2 tabanlı); önekleri 200m ile aynı. sentence-transformers>=6.1 ve
+    # transformers>=5.19 ister (yalnızca Colab'da yükseltildi), Hugging Face'te erişim onayı gerekir
+    "magibu2_text": dict(MODEL_NAME="alibayram/embeddingmagibu2-text-v1", MODEL_MAX_TOKENS=8192,
+                         QUERY_PROMPT="task: search result | query: ",
+                         DOCUMENT_FORMAT="title: {title} | text: {text}"),
 }
 
 
