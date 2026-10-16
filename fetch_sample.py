@@ -1,15 +1,18 @@
-r"""Bucket'tan kaynak başına kotalarla rastgele karar örneklemi çeker -> data/n<boyut>/kararlar.parquet
+r"""Bucket'tan kaynak başına kotalarla karar örneklemi çeker -> data/n<boyut>/kararlar.parquet
 
-Havuz boyutu config.DATASET_SIZE ile seçilir. BASE_SIZE (2000) havuzundan büyük havuzlar onu kapsar:
-2000 karar aynen alınır, kaynak kotalarının eksiği yeni kararlarla doldurulur. Böylece test setinin
-hedef kararları büyük havuzda da bulunur.
+Büyük havuz bir öncekini kapsar: 10 bin 2000'i, 100 bin 10 bini aynen alır, kaynak kotalarının eksiği yeni
+kararlarla doldurulur. Böylece test setinin hedef kararları büyük havuzda da bulunur.
 
-Dosyaların tamamı indirilmez: her kaynaktan rastgele birkaç parquet bloğu (row group) okunur
-ve her bloktan rastgele kararlar seçilir.
+Doldurma:
+    2000 / 10 bin: her kaynaktan rastgele birkaç parquet bloğu (row group) okunur, her bloktan rastgele kararlar.
+    100 bin (ürün havuzu): her kaynakta en yeni kararlar (karar_tarihi), günümüzden geçmişe doğru.
+Dosyaların tamamı indirilmez, yalnızca gereken bloklar okunur.
 
 Kullanım:
-    .venv\Scripts\python.exe fetch_sample.py
+    .venv\Scripts\python.exe fetch_sample.py                 # config.DATASET_SIZE
+    .venv\Scripts\python.exe fetch_sample.py --size 100000
 """
+import argparse
 import math
 import random
 
@@ -47,12 +50,41 @@ def sample_source(fs, rng, source, quota, exclude):
     return out.sample(n=min(quota, len(out)), random_state=config.SEED)
 
 
+def newest_source(fs, source, quota, exclude):
+    """Kaynaktan en yeni quota kadar kararı seçer; exclude içindeki kararlar seçilmez.
+    Bloklar en yeni tarihlerinden başlayarak okunur; bir bloğun en yeni kararı, o ana kadar seçilenlerin
+    en eskisinden de eskiyse kalan bloklarda daha yeni karar yoktur ve okuma durur."""
+    groups = []  # (bloğun en yeni karar tarihi, dosya, blok)
+    for path in sorted(fs.ls(f"{config.BUCKET_DATA}/{source}", detail=False)):
+        with fs.open(path, "rb") as f:
+            meta = pq.ParquetFile(f).metadata
+        column = meta.schema.to_arrow_schema().get_field_index("karar_tarihi")
+        for rg in range(meta.num_row_groups):
+            stats = meta.row_group(rg).column(column).statistics
+            groups.append((stats.max if stats and stats.has_min_max else "", path, rg))
+    out = pd.DataFrame(columns=COLUMNS)
+    for i, (newest, path, rg) in enumerate(sorted(groups, reverse=True), 1):
+        if len(out) >= quota and newest < out.karar_tarihi.iloc[quota - 1]:
+            break
+        with fs.open(path, "rb") as f:
+            df = pq.ParquetFile(f).read_row_group(rg, columns=COLUMNS).to_pandas()
+        df = df[(df.text_len >= config.MIN_TEXT_LEN) & df.karar_tarihi.notna() & ~df.id.isin(exclude)]
+        out = pd.concat([out, df]).drop_duplicates("id").sort_values("karar_tarihi", ascending=False)
+        print(f"  [{i}/{len(groups)}] {path.rsplit('/', 1)[-1]} blok {rg}: {len(df)} karar, en yeni {newest}")
+    out = out.head(quota)
+    print(f"  {len(out)} karar, tarih aralığı {out.karar_tarihi.min()} - {out.karar_tarihi.max()}")
+    return out
+
+
 def main():
-    size = config.DATASET_SIZE
+    parser = argparse.ArgumentParser(description="Bucket'tan karar havuzu çeker")
+    parser.add_argument("--size", type=int, default=config.DATASET_SIZE, choices=[2000, 10000, 100000])
+    size = parser.parse_args().size
+    base_size = {10000: 2000, 100000: 10000}.get(size)  # kapsanan önceki havuz
     base = pd.DataFrame(columns=COLUMNS)
-    if size > config.BASE_SIZE:
-        base = pd.read_parquet(config.dataset_dir(config.BASE_SIZE) / "kararlar.parquet")
-        print(f"{config.BASE_SIZE} kararlık havuz alındı ({len(base)} karar), üzerine eklenecek.")
+    if base_size:
+        base = pd.read_parquet(config.dataset_dir(base_size) / "kararlar.parquet")
+        print(f"{base_size} kararlık havuz alındı ({len(base)} karar), üzerine eklenecek.")
     # 2000'lik havuz ilk çekimdeki tohumla aynı kalır; büyük havuzlar farklı bloklardan örneklensin diye başka tohum
     rng = random.Random(config.SEED if size == config.BASE_SIZE else config.SEED + size)
     fs = HfFileSystem()
@@ -62,14 +94,18 @@ def main():
         need = quota - int((base.source == source).sum())
         if need <= 0:
             continue
-        print(f"{source}: {need} yeni karar örnekleniyor")
-        parts.append(sample_source(fs, rng, source, need, set(base.id)))
+        print(f"{source}: {need} yeni karar seçiliyor")
+        if size == 100000:
+            parts.append(newest_source(fs, source, need, set(base.id)))
+        else:
+            parts.append(sample_source(fs, rng, source, need, set(base.id)))
     df = pd.concat(parts, ignore_index=True)
     assert df.id.is_unique
-    config.DATASET_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(config.SAMPLE_PATH, index=False)
+    path = config.dataset_dir(size) / "kararlar.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False)
 
-    print(f"\n{len(df)} karar -> {config.SAMPLE_PATH}")
+    print(f"\n{len(df)} karar -> {path}")
     summary = df.groupby("source").agg(
         karar=("id", "size"),
         daire_sayisi=("court", "nunique"),

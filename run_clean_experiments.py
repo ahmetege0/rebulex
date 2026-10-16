@@ -23,6 +23,7 @@ Kullanım:
     .venv\Scripts\python.exe run_clean_experiments.py                                # iki havuz, bütün modeller
     .venv\Scripts\python.exe run_clean_experiments.py --size 2000 --model cosmos_e5  # tek havuz, tek model
     .venv\Scripts\python.exe run_clean_experiments.py --size 2000 --model magibu_embedding --tam-kunye --deneme recursive_c1024_o128
+    .venv\Scripts\python.exe run_clean_experiments.py --size 100000 --model cosmos_e5 --deneme per_decision   # ürün havuzu
 """
 import argparse
 import gc
@@ -220,7 +221,8 @@ def run_model(name, size, raw_text=False, full_title=False, only=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Temiz 2000'lik havuzda denemeler")
-    parser.add_argument("--size", type=int, choices=SIZES, help="Verilmezse iki havuz sırayla")
+    # 100 bin (ürün havuzu) yalnızca açıkça seçilince çalışır
+    parser.add_argument("--size", type=int, choices=[*SIZES, 100000], help="Verilmezse 2000 ve 10 bin sırayla")
     parser.add_argument("--model", choices=list(MODELS), help="Verilmezse bütün modeller sırayla")
     # başlığın ve temizliğin etkisini ayırmak için (çıktılar ayrı klasöre gider: ham_kisa_baslik, temiz_tam_kunye)
     parser.add_argument("--ham-metin", action="store_true", help="Temiz yerine orijinal metin (kısa başlıkla)")
